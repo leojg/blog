@@ -1,0 +1,62 @@
+baseURL: https://blog.lgcode.me/
+locale: en-us
+title: lgcode
+theme: PaperMod
+
+enableRobotsTXT: true
+buildDrafts: false
+buildFuture: false
+buildExpired: false
+
+pagination:
+  pagerSize: 10
+
+minify:
+  disableXML: true
+
+outputs:
+  home:
+    - HTML
+    - RSS
+    - JSON # required by PaperMod's search page
+
+params:
+  env: production
+  author: Leandro Garcia
+  description: >-
+    Field notes from building things: edge computer vision, MCP servers,
+    and business automation.
+  defaultTheme: auto
+  ShowReadingTime: true
+  ShowShareButtons: false
+  ShowPostNavLinks: true
+  ShowBreadCrumbs: true
+  ShowCodeCopyButtons: true
+  ShowRssButtonInSectionTermList: true
+  ShowToc: true
+  homeInfoParams:
+    Title: Hi, I'm Leandro
+    Content: >-
+      I build computer-vision systems for heavy industry, automation for small
+      businesses, and open-source tools. This is where I write down what broke,
+      what worked, and why.
+  socialIcons:
+    - name: github
+      url: https://github.com/leojg
+    - name: rss
+      url: /index.xml
+
+menu:
+  main:
+    - identifier: archives
+      name: Archive
+      url: /archives/
+      weight: 10
+    - identifier: tags
+      name: Tags
+      url: /tags/
+      weight: 20
+    - identifier: search
+      name: Search
+      url: /search/
+      weight: 30
