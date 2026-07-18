@@ -39,7 +39,8 @@ params:
     Content: >-
       I build computer-vision systems for heavy industry, automation for small
       businesses, and open-source tools. This is where I write down what broke,
-      what worked, and why.
+      what worked, and why. Everything here starts from my own project notes,
+      postmortems, and research — and I use AI heavily to draft and edit it.
   socialIcons:
     - name: github
       url: https://github.com/leojg
