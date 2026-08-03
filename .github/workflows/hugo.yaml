@@ -3,10 +3,19 @@ name: Deploy Hugo site to Pages
 on:
   push:
     branches: ["main"]
+  # Scheduled publishing: hugo.yaml sets buildFuture:false, so a post whose
+  # `date` is in the future is not built at all. This rebuild is what makes such
+  # a post appear once its date passes — the cadence lives in the post dates
+  # (see scripts/blog), not here.
+  # Every 6h rather than daily so that any time-of-day in a post's `date` goes
+  # live the same day. A daily build fixes the publish hour, and a post stamped
+  # later than it would appear a day after its own printed date.
+  schedule:
+    - cron: "10 */6 * * *" # 00:10/06:10/12:10/18:10 UTC = 21:10/03:10/09:10/15:10 -03:00
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # keepalive commit only; see the keepalive step below
   pages: write
   id-token: write
 
@@ -32,6 +41,26 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity, and workflow runs do not count as activity — only commits do.
+      # A gap between writing batches would silently stop the publisher, so
+      # nudge the clock when the repo has been quiet. Pushes made with
+      # GITHUB_TOKEN do not trigger workflows, so this cannot loop.
+      - name: Keep the schedule trigger alive
+        if: github.event_name == 'schedule'
+        run: |
+          quiet_days=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "last commit was ${quiet_days} day(s) ago"
+          if [ "$quiet_days" -ge 45 ]; then
+            date -u +%Y-%m-%dT%H:%M:%SZ > .github/keepalive
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/keepalive
+            git commit -m "chore: keepalive so the publish schedule stays enabled"
+            # checkout leaves a detached HEAD; push the ref explicitly.
+            git push origin HEAD:main
+          fi
+
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v5

@@ -1,0 +1,457 @@
+#!/usr/bin/env python3
+"""blog — draft / schedule / publish helper for this Hugo site.
+
+Publishing model
+----------------
+`hugo.yaml` sets `buildFuture: false`, so a post whose `date` is in the future is
+excluded from the build entirely — page, list pages, sitemap and RSS. A GitHub
+Actions cron rebuilds the site every day, so a post goes live on the first build
+after its `date` passes.
+
+Scheduling is therefore nothing more than: set `draft: false`, set `date` to a
+future slot, commit, push. No queue service, no CMS, no external state.
+
+Slots are Wednesday and Saturday at 09:00 -03:00 (see the SLOT_* constants).
+
+Usage
+-----
+    scripts/blog queue                      show drafts / scheduled / published
+    scripts/blog preview                    local server incl. drafts + future
+    scripts/blog new my-post-slug           create a draft from the archetype
+    scripts/blog schedule FILE [FILE ...]   assign the next free slots
+    scripts/blog schedule --drafts          schedule every draft (name order)
+    scripts/blog schedule --dry-run ...     show the plan, change nothing
+    scripts/blog arm FILE ...               publish on the date already in the file
+    scripts/blog unschedule FILE ...        pull a post back to draft
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+POSTS_DIR = ROOT / "content" / "posts"
+
+# Publication slots. Python weekdays: Mon=0 … Sun=6.
+SLOT_WEEKDAYS = (2, 5)  # Wednesday, Saturday
+SLOT_HOUR = 9
+SLOT_MINUTE = 0
+# Uruguay is UTC-3 year round (no DST since 2015), so a fixed offset is exact.
+TZ = timezone(timedelta(hours=-3))
+
+DAY_NAMES = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+FIELD_RE = re.compile(r"^(?P<key>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<value>.*)$")
+
+
+class PostError(Exception):
+    pass
+
+
+class Post:
+    """A content file, with only the three fields we ever touch parsed out.
+
+    Deliberately not a YAML round-trip: the frontmatter here uses folded blocks
+    (`description: >-`) that a hand-rolled parser would mangle on rewrite, so we
+    only ever replace individual `date:` / `draft:` lines in place.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lines = path.read_text(encoding="utf-8").split("\n")
+        if not self.lines or self.lines[0].strip() != "---":
+            raise PostError(f"{self.rel}: no frontmatter block")
+        try:
+            self.fm_end = next(
+                i for i, line in enumerate(self.lines[1:], start=1)
+                if line.strip() == "---"
+            )
+        except StopIteration:
+            raise PostError(f"{self.rel}: unterminated frontmatter block") from None
+
+        self._index: dict[str, int] = {}
+        for i in range(1, self.fm_end):
+            m = FIELD_RE.match(self.lines[i])
+            # Only top-level keys; indented lines belong to folded/nested values.
+            if m and not self.lines[i][:1].isspace():
+                self._index.setdefault(m.group("key").lower(), i)
+
+    @property
+    def rel(self) -> str:
+        return str(self.path.relative_to(ROOT))
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+    def raw(self, key: str) -> str | None:
+        i = self._index.get(key)
+        return FIELD_RE.match(self.lines[i]).group("value").strip() if i is not None else None
+
+    @property
+    def title(self) -> str:
+        value = self.raw("title") or self.path.stem
+        return value.strip("\"'")
+
+    @property
+    def draft(self) -> bool:
+        return (self.raw("draft") or "false").strip().lower() == "true"
+
+    @property
+    def date(self) -> datetime | None:
+        value = self.raw("date")
+        if not value:
+            return None
+        value = value.strip("\"'")
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+        return dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt
+
+    def set(self, key: str, value: str) -> None:
+        line = f"{key}: {value}"
+        i = self._index.get(key)
+        if i is None:
+            # Append at the end of the block; every existing key precedes it.
+            self.lines.insert(self.fm_end, line)
+            self._index[key] = self.fm_end
+            self.fm_end += 1
+        else:
+            self.lines[i] = line
+
+    def save(self) -> None:
+        self.path.write_text("\n".join(self.lines), encoding="utf-8")
+
+    # -- state ------------------------------------------------------------
+    def state(self, now: datetime) -> str:
+        if self.draft:
+            return "draft"
+        if self.date is None:
+            return "undated"
+        return "scheduled" if self.date > now else "published"
+
+
+def load_posts() -> list[Post]:
+    posts = []
+    for path in sorted(POSTS_DIR.glob("*.md")):
+        if path.name.startswith("_"):
+            continue
+        try:
+            posts.append(Post(path))
+        except PostError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+    return posts
+
+
+def fmt(dt: datetime) -> str:
+    return f"{dt.date().isoformat()} {DAY_NAMES[dt.weekday()]} {dt:%H:%M}"
+
+
+def iso(dt: datetime) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%S%z")[:-2] + ":" + dt.strftime("%z")[-2:]
+
+
+def free_slots(occupied: set[datetime], after: datetime, count: int):
+    """Yield the next `count` unoccupied Wed/Sat slots strictly after `after`.
+
+    Earliest-free rather than strictly-after-the-last-post, so a manually pinned
+    far-future date does not push the whole queue behind it — gaps get filled.
+    """
+    cursor = after.astimezone(TZ)
+    day = cursor.date()
+    found = []
+    # 4 years of candidate days is a hard stop against a pathological occupied set.
+    for _ in range(366 * 4):
+        slot = datetime.combine(day, datetime.min.time(), tzinfo=TZ).replace(
+            hour=SLOT_HOUR, minute=SLOT_MINUTE
+        )
+        if slot.weekday() in SLOT_WEEKDAYS and slot > after and slot not in occupied:
+            found.append(slot)
+            if len(found) == count:
+                return found
+        day += timedelta(days=1)
+    raise PostError("could not find enough free slots")
+
+
+# -- commands -------------------------------------------------------------
+
+
+def cmd_queue(args) -> int:
+    now = datetime.now(TZ)
+    posts = load_posts()
+    buckets: dict[str, list[Post]] = {"draft": [], "scheduled": [], "published": [], "undated": []}
+    for post in posts:
+        buckets[post.state(now)].append(post)
+
+    buckets["scheduled"].sort(key=lambda p: p.date)
+    buckets["published"].sort(key=lambda p: p.date, reverse=True)
+
+    print(f"now: {fmt(now)} -03:00   slots: Wed + Sat {SLOT_HOUR:02d}:{SLOT_MINUTE:02d}\n")
+
+    print(f"DRAFTS ({len(buckets['draft'])}) — not built, not scheduled")
+    for post in buckets["draft"]:
+        print(f"  {'':<20}  {post.name:<44}  {post.title}")
+    if not buckets["draft"]:
+        print("  (none)")
+
+    print(f"\nSCHEDULED ({len(buckets['scheduled'])}) — go live automatically")
+    for post in buckets["scheduled"]:
+        days = (post.date.date() - now.date()).days
+        eta = {0: "today", 1: "tomorrow"}.get(days, f"in {days}d")
+        print(f"  {fmt(post.date):<20}  {post.name:<44}  {post.title}  ({eta})")
+    if not buckets["scheduled"]:
+        print("  (none)")
+
+    print(f"\nPUBLISHED ({len(buckets['published'])})")
+    for post in buckets["published"][: args.limit]:
+        print(f"  {fmt(post.date):<20}  {post.name:<44}  {post.title}")
+    if len(buckets["published"]) > args.limit:
+        print(f"  … {len(buckets['published']) - args.limit} more")
+
+    if buckets["undated"]:
+        print(f"\nUNDATED ({len(buckets['undated'])}) — fix these, Hugo will treat them as very old")
+        for post in buckets["undated"]:
+            print(f"  {'':<20}  {post.name}")
+
+    occupied = {p.date for p in posts if p.date}
+    upcoming = free_slots(occupied, now, 3)
+    print("\nnext free slots: " + ", ".join(fmt(s) for s in upcoming))
+    return 0
+
+
+def cmd_schedule(args) -> int:
+    now = datetime.now(TZ)
+    posts = load_posts()
+    by_name = {p.name: p for p in posts}
+    by_rel = {p.rel: p for p in posts}
+
+    if args.drafts:
+        targets = [p for p in posts if p.draft]
+        if not targets:
+            print("no drafts to schedule.")
+            return 0
+    else:
+        targets = []
+        for raw in args.files:
+            name = Path(raw).name
+            post = by_rel.get(raw) or by_name.get(name)
+            if post is None:
+                print(f"error: no such post: {raw}", file=sys.stderr)
+                return 1
+            targets.append(post)
+
+    skipped = []
+    queue = []
+    for post in targets:
+        state = post.state(now)
+        if state == "published" and not args.force:
+            skipped.append((post, "already published — use --force to re-date"))
+        elif state == "scheduled" and not args.force:
+            skipped.append((post, f"already scheduled for {fmt(post.date)} — use --force to re-slot"))
+        else:
+            queue.append(post)
+
+    for post, why in skipped:
+        print(f"skip  {post.name}: {why}")
+    if not queue:
+        return 0
+
+    after = now
+    if args.start:
+        try:
+            start = datetime.fromisoformat(args.start)
+        except ValueError:
+            print(f"error: --start must be ISO (YYYY-MM-DD): {args.start}", file=sys.stderr)
+            return 1
+        after = max(now, start.replace(tzinfo=TZ) if start.tzinfo is None else start)
+
+    occupied = {p.date for p in posts if p.date and p not in queue}
+    slots = free_slots(occupied, after, len(queue))
+
+    print()
+    for post, slot in zip(queue, slots):
+        print(f"  {post.name:<44}  →  {fmt(slot)} -03:00")
+        if not args.dry_run:
+            post.set("date", iso(slot))
+            post.set("draft", "false")
+            post.save()
+
+    if args.dry_run:
+        print("\n(dry run — nothing written)")
+        return 0
+
+    print(f"\nscheduled {len(queue)} post(s). They go live on the first build after each date.")
+    print("commit and push to arm them:")
+    print("  git -C %s add -A && git -C %s commit -m 'Schedule posts' && git -C %s push"
+          % (ROOT, ROOT, ROOT))
+    return 0
+
+
+def cmd_arm(args) -> int:
+    """Publish on the date already written in the file — no re-slotting.
+
+    The counterpart to `schedule`: that one assigns the next free slot and owns
+    the date, this one trusts a date you picked yourself and only flips `draft`.
+    """
+    now = datetime.now(TZ)
+    posts = load_posts()
+    by_name = {p.name: p for p in posts}
+    by_rel = {p.rel: p for p in posts}
+
+    if args.drafts:
+        targets = [p for p in posts if p.draft]
+        if not targets:
+            print("no drafts to arm.")
+            return 0
+    else:
+        targets = []
+        for raw in args.files:
+            post = by_rel.get(raw) or by_name.get(Path(raw).name)
+            if post is None:
+                print(f"error: no such post: {raw}", file=sys.stderr)
+                return 1
+            targets.append(post)
+
+    armed = 0
+    print()
+    for post in targets:
+        if post.date is None:
+            print(f"skip  {post.name}: no usable date — set one, or use `schedule`")
+            continue
+        if not post.draft:
+            print(f"skip  {post.name}: already armed for {fmt(post.date)}")
+            continue
+        if post.date <= now:
+            # Naming a file explicitly is a coherent "publish this now"; sweeping
+            # every draft is where a stale date turns into an accidental publish.
+            if args.drafts:
+                print(f"skip  {post.name}: dated {fmt(post.date)}, in the past — "
+                      f"name it explicitly to publish it now")
+                continue
+            print(f"  {post.name:<44}  →  live {fmt(post.date)}"
+                  f"   ** in the past — publishes on the NEXT build")
+        else:
+            print(f"  {post.name:<44}  →  live {fmt(post.date)}")
+        if not args.dry_run:
+            post.set("draft", "false")
+            post.save()
+            armed += 1
+
+    if args.dry_run:
+        print("\n(dry run — nothing written)")
+        return 0
+    if armed:
+        print(f"\narmed {armed} post(s); dates untouched. Commit and push to activate.")
+    return 0
+
+
+def cmd_unschedule(args) -> int:
+    now = datetime.now(TZ)
+    posts = {p.name: p for p in load_posts()}
+    for raw in args.files:
+        post = posts.get(Path(raw).name)
+        if post is None:
+            print(f"error: no such post: {raw}", file=sys.stderr)
+            return 1
+        if post.state(now) == "published" and not args.force:
+            print(f"skip  {post.name}: already published — --force to unpublish (leaves a dead URL)")
+            continue
+        post.set("draft", "true")
+        post.save()
+        print(f"  {post.name:<44}  →  draft")
+    return 0
+
+
+def cmd_preview(args) -> int:
+    cmd = ["hugo", "server", "--buildDrafts", "--buildFuture", "--port", str(args.port)]
+    print("serving drafts + future posts on http://localhost:%d  (ctrl-c to stop)" % args.port)
+    return subprocess.call(cmd, cwd=ROOT)
+
+
+def cmd_new(args) -> int:
+    slug = args.slug.removesuffix(".md")
+    rc = subprocess.call(["hugo", "new", f"posts/{slug}.md"], cwd=ROOT)
+    if rc == 0:
+        print(f"draft created. edit content/posts/{slug}.md, then: scripts/blog schedule {slug}.md")
+    return rc
+
+
+def cmd_check(args) -> int:
+    """Build exactly like CI does and report what a build right now would ship.
+
+    Builds to a temp directory: `public/` is shared with `hugo server`, and a
+    check run must not leave stale output behind for a preview to be read from.
+    """
+    env = dict(os.environ, HUGO_ENVIRONMENT="production")
+    out = Path(tempfile.mkdtemp(prefix="blog-check-"))
+    rc = subprocess.call(["hugo", "--gc", "--minify", "--destination", str(out)], cwd=ROOT, env=env)
+    if rc != 0:
+        return rc
+    # `page` is Hugo's pagination directory, not a post.
+    built = sorted(p.name for p in (out / "posts").iterdir() if p.is_dir() and p.name != "page")
+    print(f"\nbuild ok — {len(built)} post(s) would be live right now:")
+    for name in built:
+        print(f"  {name}")
+    shutil.rmtree(out, ignore_errors=True)
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="blog", description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("queue", aliases=["status", "ls"], help="show drafts / scheduled / published")
+    p.add_argument("--limit", type=int, default=10, help="published posts to list (default 10)")
+    p.set_defaults(func=cmd_queue)
+
+    p = sub.add_parser("schedule", help="assign the next free Wed/Sat slots")
+    p.add_argument("files", nargs="*", help="post files, in the order you want them to appear")
+    p.add_argument("--drafts", action="store_true", help="schedule every draft, in filename order")
+    p.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    p.add_argument("--force", action="store_true", help="re-slot already scheduled/published posts")
+    p.add_argument("--start", metavar="DATE", help="earliest slot to consider (YYYY-MM-DD)")
+    p.set_defaults(func=cmd_schedule)
+
+    p = sub.add_parser("arm", help="publish on the date already in the file (no re-slotting)")
+    p.add_argument("files", nargs="*", help="post files whose dates you set by hand")
+    p.add_argument("--drafts", action="store_true", help="arm every draft")
+    p.add_argument("--dry-run", action="store_true", help="print the plan, write nothing")
+    p.set_defaults(func=cmd_arm)
+
+    p = sub.add_parser("unschedule", help="pull a post back to draft")
+    p.add_argument("files", nargs="+")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_unschedule)
+
+    p = sub.add_parser("preview", help="hugo server including drafts and future posts")
+    p.add_argument("--port", type=int, default=1313)
+    p.set_defaults(func=cmd_preview)
+
+    p = sub.add_parser("new", help="create a draft from the archetype")
+    p.add_argument("slug")
+    p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("check", help="production build; list what would be live right now")
+    p.set_defaults(func=cmd_check)
+
+    args = parser.parse_args()
+    if args.cmd in ("schedule", "arm") and not args.drafts and not args.files:
+        parser.error(f"{args.cmd} needs one or more post files, or --drafts")
+    try:
+        return args.func(args)
+    except PostError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

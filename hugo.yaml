@@ -1,10 +1,14 @@
 baseURL: https://blog.lgcode.me/
 locale: en-us
+timeZone: America/Montevideo
 title: lgcode
 theme: PaperMod
 
 enableRobotsTXT: true
 buildDrafts: false
+# Load-bearing: a post dated in the future is excluded from the build, the list
+# pages, the sitemap and the RSS feed. That is how scheduled publishing works
+# here — see scripts/blog and the cron in .github/workflows/hugo.yaml.
 buildFuture: false
 buildExpired: false
 
