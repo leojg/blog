@@ -1,7 +1,7 @@
 ---
 title: "The Demo Video Was the Easy Part"
-date: 2026-08-07T10:00:00-03:00
-draft: true
+date: 2026-08-08T09:00:00-03:00
+draft: false
 tags: [agents, llm, video, data-quality, economics]
 description: >-
   A margin that was arithmetically correct and substantively false, confidence
