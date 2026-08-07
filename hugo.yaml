@@ -27,6 +27,12 @@ outputs:
 params:
   env: production
   author: Leandro Garcia
+  # Cloudflare Web Analytics site token. Get it at:
+  #   Cloudflare dashboard -> Analytics & Logs -> Web Analytics -> Add a site
+  #   -> blog.lgcode.me -> copy the token out of the JS snippet.
+  # Public by design (it ships in the page source). Empty = no beacon emitted.
+  # Only fires on production builds; see layouts/_partials/extend_footer.html.
+  cloudflareAnalytics: "2d1991bba480404b9648410f941659a0"
   description: >-
     Field notes from building things: edge computer vision, MCP servers,
     and business automation.

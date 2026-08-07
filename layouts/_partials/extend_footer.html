@@ -1,0 +1,23 @@
+{{- /* Cloudflare Web Analytics.
+
+     Cookieless and privacy-first, so it needs no consent banner — which is the reason
+     it was picked over GA for a site with an EU-reachable audience.
+
+     The site token lives in hugo.yaml as `params.cloudflareAnalytics`; it is a public
+     token (it ships in the page source by design), so it is safe in the repo. Empty
+     value = no beacon emitted at all.
+
+     Gated on hugo.IsProduction so `hugo server` and local preview builds never send
+     hits. The deploy workflow sets HUGO_ENVIRONMENT: production, so CI builds do.
+
+     Overrides themes/PaperMod/layouts/_partials/extend_footer.html, which is an empty
+     placeholder — nothing is being clobbered.
+*/ -}}
+{{- with site.Params.cloudflareAnalytics }}
+{{- if hugo.IsProduction }}
+<!-- Cloudflare Web Analytics -->
+<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js"
+        data-cf-beacon='{"token": "{{ . }}"}'></script>
+<!-- End Cloudflare Web Analytics -->
+{{- end }}
+{{- end }}
