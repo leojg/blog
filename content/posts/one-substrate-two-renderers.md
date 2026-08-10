@@ -1,7 +1,7 @@
 ---
 title: "One Substrate, Two Renderers"
 date: 2026-08-22T09:00:00-03:00
-draft: true
+draft: false
 tags: [meta, agents, writing, documentation, process]
 description: >-
   The pipeline that turns a production system into a demo video and the one that

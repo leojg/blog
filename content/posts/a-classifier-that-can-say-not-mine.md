@@ -1,7 +1,7 @@
 ---
 title: 'A Classifier That Can Say "Not Mine"'
 date: 2026-08-26T09:00:00-03:00
-draft: true
+draft: false
 tags: [machine-learning, computer-vision, classification, production-ml]
 description: >-
   Almost all classification writing assumes a closed set. In production you need
@@ -42,11 +42,11 @@ So each refiner carries an explicit **reject class** alongside its products. It 
 
 Both non-answers land in the same place, by design:
 
-| Refiner says | Reported | Queued for review |
-|---|---|---|
-| a product, above the gate | that product | no |
-| a product, below the gate | the coarse family | yes |
-| reject, at any confidence | the coarse family | yes |
+| Refiner says              | Reported          | Queued for review |
+| ------------------------- | ----------------- | ----------------- |
+| a product, above the gate | that product      | no                |
+| a product, below the gate | the coarse family | yes               |
+| reject, at any confidence | the coarse family | yes               |
 
 Falling back to the coarse family is the important bit. The system doesn't discard the
 pass, and it doesn't guess. It reports the thing it does know — the family — and flags the

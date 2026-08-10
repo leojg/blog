@@ -1,7 +1,7 @@
 ---
 title: "The Cache That Cancels Your Improvement"
 date: 2026-08-29T09:00:00-03:00
-draft: true
+draft: false
 tags: [caching, llm, data-pipelines, debugging]
 description: >-
   I improved a matching pipeline, measured the improvement, deployed it, and

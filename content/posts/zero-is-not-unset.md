@@ -1,7 +1,7 @@
 ---
 title: "Zero Is Not Unset"
 date: 2026-08-19T09:00:00-03:00
-draft: true
+draft: false
 tags: [api-design, data-modelling, configuration, bugs]
 description: >-
   A form field prepopulated with 0 silently shadowed every rate below it in an

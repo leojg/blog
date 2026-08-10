@@ -1,7 +1,7 @@
 ---
 title: '"Verify the Mechanism Is Firing" — It Had Never Been Deployed'
 date: 2026-08-15T09:00:00-03:00
-draft: true
+draft: false
 tags: [deployment, verification, data-pipelines, postmortem]
 description: >-
   A task framed as "check why this misbehaves" found the mechanism had been built
@@ -76,12 +76,12 @@ The right answer was to leave them unattributed and say so.
 
 Four assumptions, each reasonable, each falsified by data that already existed:
 
-| Assumed | Actual |
-|---|---|
-| The mechanism is running | Never deployed |
-| Addresses are often missing | Present on 98%, rendered inconsistently |
-| History can bootstrap a supplier map | Covers 9% of the gap |
-| The residue is a data problem | The residue is genuinely shared costs |
+| Assumed                              | Actual                                  |
+| ------------------------------------ | --------------------------------------- |
+| The mechanism is running             | Never deployed                          |
+| Addresses are often missing          | Present on 98%, rendered inconsistently |
+| History can bootstrap a supplier map | Covers 9% of the gap                    |
+| The residue is a data problem        | The residue is genuinely shared costs   |
 
 None of those required new instrumentation. The deployment state was one API call. The
 address statistics were one query against a spreadsheet that had been accumulating for
